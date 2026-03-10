@@ -22,12 +22,12 @@ data:
   eval_data: "../data/moshi_dataset/eval.jsonl"
   shuffle: true
 
-# LoRA (rank reduced for 24GB VRAM)
+# LoRA (24GB VRAM constraints)
 lora:
   enable: true
-  rank: 64             # Reduced from 128 to fit 24GB GPU
-  scaling: 128.0       # alpha = 2*rank. Effective multiplier = 128/64 = 2.0
-  ft_embed: true       # CRITIQUE : fine-tune les embeddings pour adaptation linguistique
+  rank: 32             # Reduced for 24GB GPU (was 128 for 48GB)
+  scaling: 64.0        # alpha = 2*rank. Effective multiplier = 64/32 = 2.0
+  ft_embed: false      # Disabled to save VRAM (~1.5GB). Text stays English-tokenized.
 
 # Poids de loss (calibres sur J-Moshi + PersonaPlex)
 first_codebook_weight_multiplier: 100.0  # Semantic tokens 100x plus importants
