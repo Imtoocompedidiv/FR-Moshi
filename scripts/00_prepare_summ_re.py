@@ -10,9 +10,13 @@ On prend les 2 locuteurs les plus actifs par reunion -> stereo.
 Canal gauche (0) = Moshi (locuteur principal)
 Canal droit  (1) = Utilisateur (second locuteur)
 
+Two-pass approach to avoid loading all audio into memory:
+  Pass 1: Stream metadata only (no audio) to select speaker pairs
+  Pass 2: Stream again, only decode audio for selected pairs
+
 Usage:
   python scripts/00_prepare_summ_re.py --max-hours 30
-  python scripts/00_prepare_summ_re.py --split dev --max-hours 10  # Pour eval
+  python scripts/00_prepare_summ_re.py --split dev --max-hours 3  # Pour eval
 
 Prereqs:
   pip install datasets soundfile numpy torchaudio
@@ -36,7 +40,6 @@ def resample_audio(audio_array, orig_sr, target_sr=24000):
         resampled = torchaudio.functional.resample(tensor, orig_sr, target_sr)
         return resampled.squeeze(0).numpy()
     except ImportError:
-        # Fallback: simple decimation (less quality but no dependency)
         ratio = orig_sr / target_sr
         n_out = int(len(audio_array) / ratio)
         indices = (np.arange(n_out) * ratio).astype(int)
@@ -44,17 +47,12 @@ def resample_audio(audio_array, orig_sr, target_sr=24000):
         return audio_array[indices]
 
 
-def clean_transcript_word(word):
-    """Nettoie un mot des conventions SUMM-RE (SPPAS format)."""
-    if not word or word in ('*', '@', '+', '#'):
-        return None
-    # Retirer les annotations entre crochets/accolades
-    if word.startswith('{') or word.startswith('['):
-        return None
-    # Retirer les parentheses d'elision
-    word = word.replace('(', '').replace(')', '')
-    # Garder les mots tronques (ex-) tels quels
-    return word.strip() if word.strip() else None
+def get_speaker_duration(segments):
+    """Calcule la duree totale de parole d'un locuteur a partir des segments."""
+    total = 0
+    for seg in segments:
+        total += seg['end'] - seg['start']
+    return total
 
 
 def process_meeting_pair(speaker1_data, speaker2_data, output_dir, meeting_id,
@@ -86,7 +84,6 @@ def process_meeting_pair(speaker1_data, speaker2_data, output_dir, meeting_id,
     if duration < min_duration:
         return []
     if duration > max_duration:
-        # Tronquer a max_duration
         max_samples = int(max_duration * target_sr)
         s1_resampled = s1_resampled[:max_samples]
         s2_resampled = s2_resampled[:max_samples]
@@ -113,14 +110,6 @@ def process_meeting_pair(speaker1_data, speaker2_data, output_dir, meeting_id,
     }]
 
 
-def get_speaker_duration(speaker_data):
-    """Calcule la duree totale de parole d'un locuteur."""
-    total = 0
-    for seg in speaker_data.get('segments', []):
-        total += seg['end'] - seg['start']
-    return total
-
-
 def convert_summ_re(
     split="train",
     output_dir="data/moshi_dataset",
@@ -129,7 +118,7 @@ def convert_summ_re(
     min_duration=10.0,
     max_duration=300.0,
 ):
-    """Convertit SUMM-RE en format moshi-finetune."""
+    """Convertit SUMM-RE en format moshi-finetune (2-pass approach)."""
     from datasets import load_dataset
 
     output_dir = Path(output_dir)
@@ -140,61 +129,118 @@ def convert_summ_re(
     print(f"  Cible : {max_hours}h maximum")
     print(f"  Output : {output_dir}")
 
-    # Charger en streaming pour eviter de telecharger tout
-    ds = load_dataset("linagora/SUMM-RE", split=split, streaming=True)
+    # ========================================
+    # PASS 1: Metadata only — select best speaker pairs
+    # No audio decoding, very fast and memory-efficient
+    # ========================================
+    print("\n--- Pass 1: Indexation des metadonnees (sans audio) ---")
 
-    # Grouper par meeting_id
-    meetings = defaultdict(list)
-    print("Indexation des locuteurs par reunion...")
+    ds_meta = load_dataset(
+        "linagora/SUMM-RE", split=split, streaming=True
+    ).remove_columns(["audio"])
 
-    for sample in ds:
+    meetings_meta = defaultdict(list)
+    sample_count = 0
+
+    for sample in ds_meta:
         mid = sample['meeting_id']
-        meetings[mid].append(sample)
+        meetings_meta[mid].append({
+            'meeting_id': mid,
+            'speaker_id': sample['speaker_id'],
+            'segments': sample.get('segments', []),
+        })
+        sample_count += 1
 
-        # Log de progression
-        if len(meetings) % 10 == 0 and len(meetings[mid]) == 1:
-            total_speakers = sum(len(v) for v in meetings.values())
-            print(f"  {len(meetings)} reunions, {total_speakers} pistes...")
+        if sample_count % 50 == 0:
+            print(f"  {sample_count} pistes, {len(meetings_meta)} reunions...")
 
-    print(f"  Total : {len(meetings)} reunions")
+    print(f"  Total : {sample_count} pistes, {len(meetings_meta)} reunions")
 
-    # Traiter chaque reunion
+    # Select best 2 speakers per meeting
+    selected_pairs = {}  # meeting_id -> (speaker1_id, speaker2_id)
+
+    for mid, speakers in sorted(meetings_meta.items()):
+        if len(speakers) < 2:
+            continue
+
+        speakers_with_dur = [
+            (s, get_speaker_duration(s['segments'])) for s in speakers
+        ]
+        speakers_with_dur.sort(key=lambda x: -x[1])
+        s1, dur1 = speakers_with_dur[0]
+        s2, dur2 = speakers_with_dur[1]
+
+        if dur1 < 30 or dur2 < 30:
+            continue
+
+        selected_pairs[mid] = (s1['speaker_id'], s2['speaker_id'])
+        print(f"  [{mid}] {s1['speaker_id']} ({dur1:.0f}s) + {s2['speaker_id']} ({dur2:.0f}s)")
+
+    print(f"\n  {len(selected_pairs)} reunions selectionnees")
+
+    if not selected_pairs:
+        print("Aucune reunion valide trouvee.")
+        return
+
+    # ========================================
+    # PASS 2: Stream with audio — process only selected pairs
+    # Only 2 audio tracks per meeting are kept in memory at a time
+    # ========================================
+    print("\n--- Pass 2: Conversion audio (paires selectionnees uniquement) ---")
+
+    ds_audio = load_dataset("linagora/SUMM-RE", split=split, streaming=True)
+
+    # Buffer: meeting_id -> {speaker_id: sample_data}
+    meeting_buffer = defaultdict(dict)
     all_entries = []
     total_hours = 0
+    processed_meetings = set()
+    sample_count = 0
 
-    for meeting_id, speakers in sorted(meetings.items()):
+    for sample in ds_audio:
+        sample_count += 1
+        mid = sample['meeting_id']
+        sid = sample['speaker_id']
+
+        if mid in processed_meetings:
+            continue
+
         if total_hours >= max_hours:
             print(f"\n  Limite de {max_hours}h atteinte.")
             break
 
-        if len(speakers) < 2:
+        if mid not in selected_pairs:
             continue
 
-        # Trouver les 2 locuteurs les plus actifs
-        speakers_with_duration = [
-            (s, get_speaker_duration(s)) for s in speakers
-        ]
-        speakers_with_duration.sort(key=lambda x: -x[1])
-        speaker1, dur1 = speakers_with_duration[0]
-        speaker2, dur2 = speakers_with_duration[1]
-
-        # Verifier qu'ils parlent suffisamment
-        if dur1 < 30 or dur2 < 30:
+        s1_id, s2_id = selected_pairs[mid]
+        if sid not in (s1_id, s2_id):
             continue
 
-        print(f"\n[{meeting_id}] {speaker1['speaker_id']} ({dur1:.0f}s) + "
-              f"{speaker2['speaker_id']} ({dur2:.0f}s)")
+        # Store this speaker's data
+        meeting_buffer[mid][sid] = sample
 
-        entries = process_meeting_pair(
-            speaker1, speaker2, stereo_dir, meeting_id,
-            target_sr, min_duration, max_duration,
-        )
+        if sample_count % 50 == 0:
+            print(f"  {sample_count} pistes lues, {len(all_entries)} fichiers generes, {total_hours:.1f}h...")
 
-        for entry in entries:
-            all_entries.append(entry)
-            total_hours += entry["duration"] / 3600
-            print(f"  -> {entry['path']} ({entry['duration']:.0f}s) "
-                  f"[total: {total_hours:.1f}h]")
+        # Check if both speakers are now available
+        if s1_id in meeting_buffer[mid] and s2_id in meeting_buffer[mid]:
+            speaker1 = meeting_buffer[mid][s1_id]
+            speaker2 = meeting_buffer[mid][s2_id]
+
+            entries = process_meeting_pair(
+                speaker1, speaker2, stereo_dir, mid,
+                target_sr, min_duration, max_duration,
+            )
+
+            for entry in entries:
+                all_entries.append(entry)
+                total_hours += entry["duration"] / 3600
+                print(f"  -> {entry['path']} ({entry['duration']:.0f}s) "
+                      f"[total: {total_hours:.1f}h]")
+
+            # Free memory
+            del meeting_buffer[mid]
+            processed_meetings.add(mid)
 
     if not all_entries:
         print("\nAucun fichier valide genere.")
