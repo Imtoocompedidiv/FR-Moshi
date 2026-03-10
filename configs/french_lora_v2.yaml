@@ -1,0 +1,63 @@
+# FR-Moshi — Configuration LoRA v2 pour fine-tuning français
+# Corrections basées sur diagnostic Run 1 (overfitting sévère) :
+#   1. rank 32 -> 128 (A6000 48GB le permet)
+#   2. ft_embed: true (essentiel pour adaptation linguistique)
+#   3. LR 5e-5 -> 1e-5 (trop agressif en Run 1)
+#   4. duration_sec 30 -> 90 (segments variés 15-120s, A6000 le gère)
+#   5. max_steps 1500 -> 500 (arrêt précoce, dataset plus gros)
+#   6. Data v2 : segments dialogue-quality, pas des meetings tronqués
+#
+# GPU cible : A6000 48GB ($0.33/h community)
+# Budget estimé : ~2h training = $0.66
+#
+# Usage :
+#   torchrun --nproc-per-node 1 -m train ../configs/french_lora_v2.yaml
+
+# Modèle de base
+moshi_paths:
+  hf_repo_id: "kyutai/moshiko-pytorch-bf16"
+
+# Données (SUMM-RE v2 + ESLO merged — dialogue-quality segments)
+data:
+  train_data: "../data/merged_v2/train.jsonl"
+  eval_data: "../data/merged_v2/eval.jsonl"
+  shuffle: true
+
+# LoRA (48GB VRAM - on peut monter le rank)
+lora:
+  enable: true
+  rank: 128            # 4x plus que Run 1 — meilleure capacité d'adaptation
+  scaling: 256.0       # alpha = 2*rank. Effective multiplier = 256/128 = 2.0
+  ft_embed: true       # CRITIQUE : adapte les embeddings pour le français
+
+# Poids de loss
+first_codebook_weight_multiplier: 100.0  # Semantic tokens 100x (inchangé, validé par J-Moshi)
+text_padding_weight: 0.4                 # Inchangé
+
+# Optimiseur — beaucoup plus conservateur que Run 1
+optim:
+  lr: 1e-5             # 5x plus bas que Run 1 — anti-overfitting
+  weight_decay: 0.1    # AdamW standard
+  pct_start: 0.10      # 10% warmup
+
+# Entraînement (A6000 48GB — 2x VRAM vs RTX 4090)
+batch_size: 2          # 2x Run 1 grâce au VRAM supplémentaire
+num_microbatches: 4    # Effective batch = 2*4 = 8 (même que Run 1)
+duration_sec: 90       # 90s = 1125 frames @ 12.5Hz (segments variés 15-120s)
+max_steps: 500         # Suffisant avec meilleure data, arrêt avant overfitting
+gradient_checkpointing: true
+
+# Checkpoints et évaluation — monitoring serré
+do_ckpt: true
+ckpt_freq: 50          # Plus fréquent pour attraper le meilleur checkpoint
+num_ckpt_keep: 6       # Garder plus de checkpoints pour comparaison
+do_eval: true
+eval_freq: 50          # Évaluer toutes les 50 steps
+log_freq: 10
+save_adapters: true
+
+# Sortie
+run_dir: "../runs/french_lora_v2"
+
+# Reproductibilité
+seed: 42
