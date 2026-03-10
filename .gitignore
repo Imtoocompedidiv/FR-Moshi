@@ -1,0 +1,10 @@
+data/
+models/
+runs/
+__pycache__/
+*.pyc
+.cache/
+test_pipeline/
+test_sample/
+*.wav
+*.mp3

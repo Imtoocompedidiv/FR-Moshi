@@ -1,0 +1,71 @@
+# FR-Moshi — Configuration LoRA pour fine-tuning francais
+# Compatible avec kyutai-labs/moshi-finetune
+#
+# Calibre d'apres :
+#   - Code source complet de moshi-finetune (train.py, loss.py, wrapped_model.py, etc.)
+#   - J-Moshi (japonais) : LR 2e-6/4e-6, batch 16, semantic weight 100x
+#   - PersonaPlex (NVIDIA) : LR 2e-6/4e-6, text_padding 0.3, non-semantic 0.02
+#   - LoRA best practices : LR 1e-4, rank 128, scaling = 2*rank
+#
+# Usage (depuis moshi-finetune/) :
+#   torchrun --nproc-per-node 1 -m train ../configs/french_lora.yaml
+
+# Modele de base
+moshi_paths:
+  hf_repo_id: "kyutai/moshiko-pytorch-bf16"
+  # tokenizer_path: null  # Garder le tokenizer anglais pour MVP
+  # Pour production : remplacer par CamemBERT SentencePiece 32k
+
+# Donnees
+data:
+  train_data: "../data/moshi_dataset/train.jsonl"
+  eval_data: "../data/moshi_dataset/eval.jsonl"
+  shuffle: true
+
+# LoRA
+lora:
+  enable: true
+  rank: 128            # Max supporte, necessaire pour changement de langue
+  scaling: 256.0       # alpha = 2*rank (convention Microsoft). Effective multiplier = 256/128 = 2.0
+  ft_embed: true       # CRITIQUE : fine-tune les embeddings pour adaptation linguistique
+
+# Poids de loss (calibres sur J-Moshi + PersonaPlex)
+first_codebook_weight_multiplier: 100.0  # Semantic tokens 100x plus importants
+text_padding_weight: 0.4                 # Entre PersonaPlex (0.3) et J-Moshi (0.5)
+
+# Optimiseur
+optim:
+  lr: 5e-5             # LoRA standard range : 5e-5 a 1e-4
+  weight_decay: 0.1    # AdamW standard
+  pct_start: 0.10      # 10% warmup (plus prudent pour language change)
+
+# Entrainement
+batch_size: 8          # A6000 48GB avec gradient_checkpointing = confortable
+duration_sec: 100      # 100s = 1250 frames @ 12.5Hz = 11,250 tokens/sample
+max_steps: 1500        # ~5 epochs sur 20h = equilibre apprentissage/overfitting
+gradient_checkpointing: true  # Divise VRAM activations par ~2, +30% temps
+
+# Si OOM, decommenter :
+# batch_size: 4
+# num_microbatches: 2  # Gradient accumulation : effective batch = 4*2 = 8
+
+# Checkpoints et evaluation
+do_ckpt: true
+ckpt_freq: 250         # Checkpoint toutes les 250 steps (securite + comparaison)
+num_ckpt_keep: 4       # Garder les 4 derniers (economise le disque)
+do_eval: true
+eval_freq: 100         # Evaluer souvent pour detecter overfitting
+log_freq: 10           # Log frequent pour monitoring
+save_adapters: true    # Sauvegarder UNIQUEMENT les poids LoRA (~300MB)
+
+# Sortie
+run_dir: "../runs/french_lora"
+
+# Reproductibilite
+seed: 42
+
+# Weights & Biases (decommenter pour monitoring)
+# wandb:
+#   project: "fr-moshi"
+#   run_name: "french-lora-r128-v1"
+#   key: ""
