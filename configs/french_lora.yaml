@@ -22,11 +22,11 @@ data:
   eval_data: "../data/moshi_dataset/eval.jsonl"
   shuffle: true
 
-# LoRA
+# LoRA (rank reduced for 24GB VRAM)
 lora:
   enable: true
-  rank: 128            # Max supporte, necessaire pour changement de langue
-  scaling: 256.0       # alpha = 2*rank (convention Microsoft). Effective multiplier = 256/128 = 2.0
+  rank: 64             # Reduced from 128 to fit 24GB GPU
+  scaling: 128.0       # alpha = 2*rank. Effective multiplier = 128/64 = 2.0
   ft_embed: true       # CRITIQUE : fine-tune les embeddings pour adaptation linguistique
 
 # Poids de loss (calibres sur J-Moshi + PersonaPlex)
@@ -39,10 +39,10 @@ optim:
   weight_decay: 0.1    # AdamW standard
   pct_start: 0.10      # 10% warmup (plus prudent pour language change)
 
-# Entrainement (RTX 4090 24GB)
-batch_size: 4          # RTX 4090 24GB avec gradient_checkpointing
-num_microbatches: 2    # Gradient accumulation : effective batch = 4*2 = 8
-duration_sec: 60       # 60s = 750 frames @ 12.5Hz (reduit pour 24GB VRAM)
+# Entrainement (RTX 4090 24GB — tight VRAM)
+batch_size: 1          # Minimal for 24GB VRAM
+num_microbatches: 8    # Gradient accumulation : effective batch = 1*8 = 8
+duration_sec: 30       # 30s = 375 frames @ 12.5Hz (fit 24GB)
 max_steps: 1500        # ~5 epochs sur 20h = equilibre apprentissage/overfitting
 gradient_checkpointing: true  # Divise VRAM activations par ~2, +30% temps
 
