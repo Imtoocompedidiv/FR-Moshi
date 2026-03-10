@@ -66,26 +66,68 @@ fi
 # ============================================================
 
 log "=== [6a/8] Prepare SUMM-RE v2 (dialogue-quality segments) ==="
-if [ ! -f "data/moshi_dataset_v2/train.jsonl" ]; then
-    log "  Preparing SUMM-RE train split..."
-    python scripts/00_prepare_summ_re_v2.py \
-        --split train \
-        --output-dir data/moshi_dataset_v2 \
-        --max-hours 80 \
-        --min-quality 0.4 \
-        --min-seg 15 \
-        --max-seg 120
-    log "  SUMM-RE train done"
+# Use ALL splits (train+dev+test) — for fine-tuning data, split boundaries don't matter
+if [ ! -f "data/moshi_dataset_v2/train_all.jsonl" ]; then
+    for SPLIT in train dev test; do
+        log "  Processing SUMM-RE split: $SPLIT"
+        python scripts/00_prepare_summ_re_v2.py \
+            --split "$SPLIT" \
+            --output-dir "data/moshi_dataset_v2/split_${SPLIT}" \
+            --max-hours 999 \
+            --min-quality 0.4 \
+            --min-seg 15 \
+            --max-seg 120
+    done
 
-    log "  Preparing SUMM-RE eval split..."
-    python scripts/00_prepare_summ_re_v2.py \
-        --split dev \
-        --output-dir data/moshi_dataset_v2 \
-        --max-hours 5 \
-        --min-quality 0.4 \
-        --min-seg 15 \
-        --max-seg 120
-    log "  SUMM-RE eval done"
+    # Merge all splits into one, then re-split 90/10 for train/eval
+    python << 'PYMERGE_SUMM'
+import json, random
+from pathlib import Path
+import shutil
+
+all_entries = []
+merged_stereo = Path("data/moshi_dataset_v2/data_stereo")
+merged_stereo.mkdir(parents=True, exist_ok=True)
+
+for split in ["train", "dev", "test"]:
+    split_dir = Path(f"data/moshi_dataset_v2/split_{split}")
+    jsonl = split_dir / "train.jsonl"  # v2 script names output train.jsonl
+    if not jsonl.exists():
+        jsonl = split_dir / "eval.jsonl"
+    if not jsonl.exists():
+        continue
+    with open(jsonl) as f:
+        for line in f:
+            entry = json.loads(line)
+            # Copy audio to merged stereo dir
+            src = split_dir / entry["path"]
+            dst = merged_stereo / Path(entry["path"]).name
+            if src.exists() and not dst.exists():
+                shutil.copy2(str(src), str(dst))
+            entry["path"] = f"data_stereo/{Path(entry['path']).name}"
+            all_entries.append(entry)
+
+random.seed(42)
+random.shuffle(all_entries)
+split_idx = int(len(all_entries) * 0.9)
+train_entries = all_entries[:split_idx]
+eval_entries = all_entries[split_idx:]
+
+out = Path("data/moshi_dataset_v2")
+for name, entries in [("train", train_entries), ("eval", eval_entries)]:
+    with open(out / f"{name}.jsonl", 'w') as f:
+        for e in entries:
+            json.dump(e, f, ensure_ascii=False)
+            f.write('\n')
+    hours = sum(e['duration'] for e in entries) / 3600
+    print(f"  SUMM-RE {name}: {len(entries)} segments, {hours:.1f}h")
+
+# Marker file
+with open(out / "train_all.jsonl", 'w') as f:
+    f.write("merged\n")
+print("SUMM-RE merge done!")
+PYMERGE_SUMM
+    log "  SUMM-RE all splits merged"
 else
     log "  SUMM-RE v2 already present"
 fi
