@@ -39,15 +39,12 @@ optim:
   weight_decay: 0.1    # AdamW standard
   pct_start: 0.10      # 10% warmup (plus prudent pour language change)
 
-# Entrainement
-batch_size: 8          # A6000 48GB avec gradient_checkpointing = confortable
-duration_sec: 100      # 100s = 1250 frames @ 12.5Hz = 11,250 tokens/sample
+# Entrainement (RTX 4090 24GB)
+batch_size: 4          # RTX 4090 24GB avec gradient_checkpointing
+num_microbatches: 2    # Gradient accumulation : effective batch = 4*2 = 8
+duration_sec: 60       # 60s = 750 frames @ 12.5Hz (reduit pour 24GB VRAM)
 max_steps: 1500        # ~5 epochs sur 20h = equilibre apprentissage/overfitting
 gradient_checkpointing: true  # Divise VRAM activations par ~2, +30% temps
-
-# Si OOM, decommenter :
-# batch_size: 4
-# num_microbatches: 2  # Gradient accumulation : effective batch = 4*2 = 8
 
 # Checkpoints et evaluation
 do_ckpt: true
