@@ -4,6 +4,7 @@
 #
 # Tout est stocke sur /runpod-volume/ pour persister entre les redemarrages.
 set -e
+export PYTHONUNBUFFERED=1
 
 # HF_TOKEN must be set as environment variable on the pod
 if [ -z "$HF_TOKEN" ]; then
